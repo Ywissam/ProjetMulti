@@ -1,91 +1,69 @@
-# encoder.py
 import cv2
 import os
 import numpy as np
 from Globale.convertionCouleur import preprocess_frame
-import configuration as config
-from Globale.DCT import encode_iframe
+from Globale.DCT               import encoder_iframe, decoder_iframe
+from Globale.ompensation       import encoder_pframe, decoder_pframe
+from Globale.entropique        import compress_and_save, compute_compression_ratio
+import configuration as cfg
 
-"partie 1"
-class VideoEncoder:
-    def __init__(self):
-        self.frames = []          # Stocke les frames brutes lues
-        self.processed_frames = [] # Stocke les frames après prétraitement
-        
-    def load_frames(self, input_dir):
-        """
-        Charge toutes les images d'un dossier.
-        """
-        frame_files = sorted([f for f in os.listdir(input_dir) if f.endswith(('.png', '.jpg'))])
-        
-        print(f"Chargement de {len(frame_files)} frames...")
-        
-        for file in frame_files:
-            path = os.path.join(input_dir, file)
-            frame = cv2.imread(path)  # Lecture en BGR
-            
-            if frame is None:
-                print(f"Erreur : impossible de lire {file}")
-                continue
-                
-            # Redimensionner si nécessaire (optionnel)
-            if frame.shape[1] != config.FRAME_WIDTH or frame.shape[0] != config.FRAME_HEIGHT:
-                frame = cv2.resize(frame, (config.FRAME_WIDTH, config.FRAME_HEIGHT))
-            
-            self.frames.append(frame)
-        
-        print(f"✓ {len(self.frames)} frames chargées avec succès")
-        return self.frames
-    
-    def preprocess_all_frames(self):
-        """
-        Applique le prétraitement (Partie 1) à toutes les frames.
-        """
-        print("\n--- Partie 1 : Prétraitement ---")
-        print("Conversion BGR → YCbCr et sous-échantillonnage 4:2:0...")
-        
-        for i, frame in enumerate(self.frames):
-            Y, Cb_sub, Cr_sub = preprocess_frame(frame)
-            
-            self.processed_frames.append({
-                'Y': Y,
-                'Cb': Cb_sub,
-                'Cr': Cr_sub,
-                'original': frame
-            })
-            
-            if (i + 1) % 10 == 0:
-                print(f"  Traitement : {i+1}/{len(self.frames)} frames")
-        
-        print(f"✓ Prétraitement terminé sur {len(self.processed_frames)} frames")
-        
-        # Afficher les tailles pour vérification
-        sample = self.processed_frames[0]
-        print(f"\nTailles après prétraitement :")
-        print(f"  Y : {sample['Y'].shape}")
-        print(f"  Cb sous-échantillonné : {sample['Cb'].shape}")
-        print(f"  Cr sous-échantillonné : {sample['Cr'].shape}")
-        
-        return self.processed_frames
-    
-    def run(self, input_dir):
-        """
-        Exécute l'encodeur.
-        """
-        self.load_frames(input_dir)
-        self.preprocess_all_frames()
-        
-        print("\n✅ Partie 1 terminée avec succès !")
-        print("Prochaine étape : Partie 2 (I-frames avec DCT)")
-        self.encoded_frames = []
 
-        for frame in self.processed_frames:
-          encoded = encode_iframe(frame, qf=50)
-        self.encoded_frames.append(encoded)
+def load_frames(dossier):
+    fichiers = sorted([f for f in os.listdir(dossier)
+                       if f.lower().endswith(('.png','.jpg'))])
+    print(f"chargement de {len(fichiers)} frames...")
+    frames = []
+    for f in fichiers:
+        img = cv2.imread(os.path.join(dossier, f))
+        if img is None:
+            continue
+        if img.shape[1] != cfg.FRAME_WIDTH or img.shape[0] != cfg.FRAME_HEIGHT:
+            img = cv2.resize(img, (cfg.FRAME_WIDTH, cfg.FRAME_HEIGHT))
+        frames.append(img)
+    print(f"  {len(frames)} frames chargees")
+    return frames
 
-        return self.processed_frames
 
-# Test rapide
-if __name__ == "__main__":
-    encoder = VideoEncoder()
-    processed = encoder.run(config.INPUT_FRAMES_DIR)
+def preprocess_all(frames):
+    print("\n--- partie 1 : pretraitement ---")
+    result = []
+    for f in frames:
+        Y, Cb, Cr = preprocess_frame(f)
+        result.append({'Y': Y, 'Cb': Cb, 'Cr': Cr})
+    s = result[0]
+    print(f"  Y:{s['Y'].shape}  Cb:{s['Cb'].shape}  Cr:{s['Cr'].shape}")
+    return result
+
+
+def encode_all(frames_pre):
+    print(f"\n--- parties 2 et 3 : encodage (GOP={cfg.GOP_SIZE} QF={cfg.QF}) ---")
+    frames_enc = []
+    frames_rec = []
+    ni = np_ = 0
+
+    for idx, pf in enumerate(frames_pre):
+        if idx % cfg.GOP_SIZE == 0:
+            enc = encoder_iframe(pf, qf=cfg.QF)
+            rec = decoder_iframe(enc)
+            ni += 1
+            print(f"  frame {idx+1:02d} -> I-frame")
+        else:
+            enc = encoder_pframe(pf, frames_rec[-1],
+                                 qf=cfg.QF, fenetre=cfg.SEARCH_RANGE)
+            rec = decoder_pframe(enc, frames_rec[-1])
+            np_ += 1
+            print(f"  frame {idx+1:02d} -> P-frame")
+        frames_enc.append(enc)
+        frames_rec.append(rec)
+
+    print(f"  {ni} I-frames  {np_} P-frames")
+    return frames_enc, frames_rec
+
+
+def save_bin(frames_orig, frames_enc, chemin):
+    taille_comp = compress_and_save(frames_enc, chemin)
+    ratio, orig = compute_compression_ratio(frames_orig, taille_comp)
+    print(f"  original   : {orig/1e6:.2f} Mo")
+    print(f"  compresse  : {taille_comp/1e6:.2f} Mo")
+    print(f"  ratio      : {ratio:.2f}x")
+    return ratio

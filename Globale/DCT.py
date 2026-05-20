@@ -1,7 +1,6 @@
 import numpy as np
 import cv2
 
-
 Q_LUMA = np.array([
     [16, 11, 10, 16, 24,  40,  51,  61],
     [12, 12, 14, 19, 26,  58,  60,  55],
@@ -25,96 +24,87 @@ Q_CHROMA = np.array([
 ], dtype=np.float32)
 
 
-def get_quantization_matrix(channel='luma', qf=50):
-    base = Q_LUMA if channel == 'luma' else Q_CHROMA
-
+def get_Q(canal='luma', qf=50):
+ 
+    base = Q_LUMA if canal == 'luma' else Q_CHROMA
     if qf < 50:
         scale = 5000 / qf
     else:
-        scale = 200 - 2 * qf
-
+        scale = 200 - 2*qf
     Q = np.floor((base * scale + 50) / 100)
-    Q = np.clip(Q, 1, 255)
-
-    return Q.astype(np.float32)
+    return np.clip(Q, 1, 255).astype(np.float32)
 
 
-def dct2d(block):
-    return cv2.dct(block.astype(np.float32))
+def dct_bloc(bloc):
+
+    return cv2.dct(np.float32(bloc))
 
 
-def idct2d(block):
-    return cv2.idct(block.astype(np.float32))
+def idct_bloc(bloc):
+    return cv2.idct(np.float32(bloc))
 
 
-def encode_channel(channel, Q):
-    H, W = channel.shape
+def encoder_canal(canal, Q):
 
-    # Padding pour multiple de 8
-    H_pad = (8 - H % 8) % 8
-    W_pad = (8 - W % 8) % 8
+    H, W = canal.shape
 
-    padded = np.pad(channel.astype(np.float32) - 128,
-                    ((0, H_pad), (0, W_pad)),
-                    mode='edge')
+    haut  = (8 - H % 8) % 8
+    droite = (8 - W % 8) % 8
+    img_pad = np.pad(canal.astype(np.float32) - 128,
+                     ((0, haut), (0, droite)), 'constant')
 
-    Hp, Wp = padded.shape
-    bh, bw = Hp // 8, Wp // 8
+    bh = img_pad.shape[0] // 8
+    bw = img_pad.shape[1] // 8
 
-    quantized = np.zeros((bh, bw, 8, 8), dtype=np.int16)
+    blocs = np.zeros((bh, bw, 8, 8), dtype=np.int16)
 
     for i in range(bh):
         for j in range(bw):
-            block = padded[i*8:(i+1)*8, j*8:(j+1)*8]
+            bloc = img_pad[i*8:(i+1)*8, j*8:(j+1)*8]
+            dct  = dct_bloc(bloc)
+            blocs[i, j] = np.int16(dct / Q)
 
-            dct_block = dct2d(block)
-            quantized[i, j] = np.round(dct_block / Q)
-
-    return quantized
+    return blocs, (H, W)
 
 
-def decode_channel(quantized_blocks, Q, original_shape):
-    bh, bw = quantized_blocks.shape[:2]
+def decoder_canal(blocs, Q, shape):
 
-    recon = np.zeros((bh * 8, bw * 8), dtype=np.float32)
+    bh, bw = blocs.shape[:2]
+    img = np.zeros((bh*8, bw*8), dtype=np.float32)
 
     for i in range(bh):
         for j in range(bw):
-            dct_block = quantized_blocks[i, j] * Q
+            dct  = blocs[i, j].astype(np.float32) * Q
+            bloc = idct_bloc(dct)
+            img[i*8:(i+1)*8, j*8:(j+1)*8] = bloc
 
-            block = idct2d(dct_block)
-            recon[i*8:(i+1)*8, j*8:(j+1)*8] = block
-
-    H, W = original_shape
-    recon = recon[:H, :W] + 128
-
-    return np.clip(recon, 0, 255).astype(np.uint8)
+    H, W = shape
+    return np.clip(img[:H, :W] + 128, 0, 255).astype(np.uint8)
 
 
-def encode_iframe(processed_frame, qf=50):
-    Qy = get_quantization_matrix('luma', qf)
-    Qc = get_quantization_matrix('chroma', qf)
+def encoder_iframe(frame, qf=50):
+    Qy = get_Q('luma',   qf)
+    Qc = get_Q('chroma', qf)
+
+    Y_blocs,  Y_shape  = encoder_canal(frame['Y'],  Qy)
+    Cb_blocs, Cb_shape = encoder_canal(frame['Cb'], Qc)
+    Cr_blocs, Cr_shape = encoder_canal(frame['Cr'], Qc)
 
     return {
-        'type': 'I',
-        'Y': encode_channel(processed_frame['Y'], Qy),
-        'Cb': encode_channel(processed_frame['Cb'], Qc),
-        'Cr': encode_channel(processed_frame['Cr'], Qc),
-        'Y_shape': processed_frame['Y'].shape,
-        'Cb_shape': processed_frame['Cb'].shape,
-        'Cr_shape': processed_frame['Cr'].shape,
-        'qf': qf
+        'type': 'I', 'qf': qf,
+        'Y_blocs':  Y_blocs,  'Y_shape':  Y_shape,
+        'Cb_blocs': Cb_blocs, 'Cb_shape': Cb_shape,
+        'Cr_blocs': Cr_blocs, 'Cr_shape': Cr_shape,
     }
 
 
-def decode_iframe(encoded):
-    qf = encoded['qf']
+def decoder_iframe(enc):
+    qf = enc['qf']
+    Qy = get_Q('luma',   qf)
+    Qc = get_Q('chroma', qf)
 
-    Qy = get_quantization_matrix('luma', qf)
-    Qc = get_quantization_matrix('chroma', qf)
+    Y  = decoder_canal(enc['Y_blocs'],  Qy, enc['Y_shape'])
+    Cb = decoder_canal(enc['Cb_blocs'], Qc, enc['Cb_shape'])
+    Cr = decoder_canal(enc['Cr_blocs'], Qc, enc['Cr_shape'])
 
-    return {
-        'Y': decode_channel(encoded['Y'], Qy, encoded['Y_shape']),
-        'Cb': decode_channel(encoded['Cb'], Qc, encoded['Cb_shape']),
-        'Cr': decode_channel(encoded['Cr'], Qc, encoded['Cr_shape'])
-    }
+    return {'Y': Y, 'Cb': Cb, 'Cr': Cr}
